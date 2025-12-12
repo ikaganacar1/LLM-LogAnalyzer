@@ -25,6 +25,25 @@ export enum SystemStatus {
   REMEDIATING = 'REMEDIATING'
 }
 
+export enum IncidentStatus {
+  PENDING = 'PENDING',
+  ANALYZING = 'ANALYZING',
+  ANALYZED = 'ANALYZED',
+  RESOLVED = 'RESOLVED',
+  IGNORED = 'IGNORED'
+}
+
+export interface Incident {
+  id: string;
+  timestamp: string;
+  triggerLog: LogEntry;
+  contextLogs: LogEntry[];
+  status: IncidentStatus;
+  proposal?: IncidentToolCall;
+  thinking?: string; // To store the chain of thought
+  analysis?: string; // To store the final content
+}
+
 export interface DeploymentAction {
   namespace: string;
   deployment: string;

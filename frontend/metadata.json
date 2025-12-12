@@ -1,0 +1,5 @@
+{
+  "name": "KubeSentinel",
+  "description": "AI-Powered Kubernetes Incident Manager with real-time log analysis and automated remediation using local Ollama LLM.",
+  "version": "1.0.0"
+}

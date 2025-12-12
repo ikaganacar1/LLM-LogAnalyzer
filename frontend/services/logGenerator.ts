@@ -331,7 +331,7 @@ export const generateLog = (forceError: boolean = false): LogEntry => {
   const rand = Math.random();
   const pod = ALL_PODS[Math.floor(Math.random() * ALL_PODS.length)];
 
-  if (rand > 0.92) {
+  if (rand > 0.95) {
     // 8% chance of warning
     return {
       id,

@@ -32,6 +32,7 @@ const App: React.FC = () => {
      setAiContent('');
 
      // Get recent logs for context
+     // Now this will include the critical log because we updated the ref synchronously
      const recentLogs = logsRef.current.slice(-15);
 
      // Call backend API with streaming
@@ -68,11 +69,21 @@ const App: React.FC = () => {
 
       const newLog = generateLog(shouldTriggerError);
 
-      setLogs(prev => {
-        const updated = [...prev, newLog];
-        // Keep logs manageable
-        return updated.length > 200 ? updated.slice(-200) : updated;
-      });
+      // --- FIX START ---
+      // Update ref immediately so handleIncidentDetected sees the new log synchronously.
+      // We calculate the new state here instead of inside setLogs to access it immediately.
+      const currentLogs = logsRef.current;
+      const updatedLogs = [...currentLogs, newLog];
+      
+      // Keep logs manageable (limit to 200)
+      const finalLogs = updatedLogs.length > 200 ? updatedLogs.slice(-200) : updatedLogs;
+      
+      // 1. Update Ref manually
+      logsRef.current = finalLogs;
+      
+      // 2. Update State
+      setLogs(finalLogs);
+      // --- FIX END ---
 
       if (shouldTriggerError) {
         handleIncidentDetected();

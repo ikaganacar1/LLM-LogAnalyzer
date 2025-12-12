@@ -3,15 +3,17 @@ import { LogTerminal } from './components/LogTerminal';
 import { IncidentPanel } from './components/IncidentPanel';
 import { LogEntry, SystemStatus, IncidentToolCall } from './types';
 import { generateLog } from './services/logGenerator';
-import { analyzeLogs } from './services/api';
+import { analyzeLogsStreaming } from './services/api';
 
 const App: React.FC = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [status, setStatus] = useState<SystemStatus>(SystemStatus.HEALTHY);
   const [proposal, setProposal] = useState<IncidentToolCall | null>(null);
-  
+  const [thinking, setThinking] = useState<string>('');
+  const [aiContent, setAiContent] = useState<string>('');
+
   const intervalRef = useRef<number | null>(null);
-  const logsRef = useRef<LogEntry[]>([]); // Ref to access latest logs in interval
+  const logsRef = useRef<LogEntry[]>([]);
 
   // Keep ref synced
   useEffect(() => {
@@ -26,40 +28,46 @@ const App: React.FC = () => {
      }
 
      setStatus(SystemStatus.ANALYZING);
-
-     // Wait a beat for UI transition
-     await new Promise(r => setTimeout(r, 1500));
+     setThinking('');
+     setAiContent('');
 
      // Get recent logs for context
      const recentLogs = logsRef.current.slice(-15);
-     
-     // Call backend API (Ollama LLM)
-     const analysis = await analyzeLogs(recentLogs);
-     
-     if (analysis) {
-        setProposal(analysis);
-        setStatus(SystemStatus.INCIDENT_DETECTED);
-     } else {
-         // Fallback mock if API fails, to ensure demo works
-         console.warn("Backend API returned null, using fallback mock for demo.");
+
+     // Call backend API with streaming
+     await analyzeLogsStreaming(recentLogs, {
+       onThinking: (content) => {
+         setThinking(prev => prev + content);
+       },
+       onContent: (content) => {
+         setAiContent(prev => prev + content);
+       },
+       onDone: (result) => {
+         setProposal(result);
+         setStatus(SystemStatus.INCIDENT_DETECTED);
+       },
+       onError: (error) => {
+         console.error('Analysis error:', error);
+         // Fallback
          setProposal({
-             toolName: 'scale_deployment',
-             args: { namespace: 'prod', deployment: 'payment-service', replicas: 5 },
-             reason: 'Detected OOMKilled errors in payment-service pod. Traffic spike analysis suggests resource exhaustion. Scaling up replicas to distribute load.'
+           toolName: 'scale_deployment',
+           args: { namespace: 'prod', deployment: 'payment-service', replicas: 5 },
+           reason: 'Detected critical errors. Using fallback recommendation.'
          });
          setStatus(SystemStatus.INCIDENT_DETECTED);
-     }
+       }
+     });
   }, []);
 
   const startLogStream = useCallback(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
-    
+
     intervalRef.current = window.setInterval(() => {
       // 5% Chance of critical error if system is healthy
       const shouldTriggerError = Math.random() < 0.05;
-      
+
       const newLog = generateLog(shouldTriggerError);
-      
+
       setLogs(prev => {
         const updated = [...prev, newLog];
         // Keep logs manageable
@@ -82,7 +90,7 @@ const App: React.FC = () => {
 
   const handleApprove = () => {
     setStatus(SystemStatus.REMEDIATING);
-    
+
     // Simulate execution time
     setTimeout(() => {
         // Add success log
@@ -93,10 +101,12 @@ const App: React.FC = () => {
             pod: 'kube-controller',
             message: `Scaled deployment ${proposal?.args.deployment} to ${proposal?.args.replicas} replicas. Status: Healthy.`
         };
-        
+
         setLogs(prev => [...prev, successLog]);
         setStatus(SystemStatus.HEALTHY);
         setProposal(null);
+        setThinking('');
+        setAiContent('');
         startLogStream();
     }, 3000);
   };
@@ -104,6 +114,8 @@ const App: React.FC = () => {
   const handleIgnore = () => {
     setStatus(SystemStatus.HEALTHY);
     setProposal(null);
+    setThinking('');
+    setAiContent('');
     startLogStream();
   };
 
@@ -111,17 +123,19 @@ const App: React.FC = () => {
     <div className="flex flex-col md:flex-row h-full w-full bg-slate-950">
       {/* Left Panel: Logs */}
       <div className="w-full md:w-1/2 h-1/2 md:h-full border-b md:border-b-0 md:border-r border-slate-800">
-        <LogTerminal 
-            logs={logs} 
-            isPaused={status !== SystemStatus.HEALTHY} 
+        <LogTerminal
+            logs={logs}
+            isPaused={status !== SystemStatus.HEALTHY}
         />
       </div>
 
       {/* Right Panel: AI Ops */}
       <div className="w-full md:w-1/2 h-1/2 md:h-full">
-        <IncidentPanel 
+        <IncidentPanel
             status={status}
             proposal={proposal}
+            thinking={thinking}
+            aiContent={aiContent}
             onApprove={handleApprove}
             onIgnore={handleIgnore}
         />

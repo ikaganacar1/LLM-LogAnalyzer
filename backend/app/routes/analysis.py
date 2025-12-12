@@ -2,9 +2,11 @@
 API routes for log analysis and action execution.
 """
 
+import json
 import asyncio
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.models.schemas import (
     AnalyzeRequest,
@@ -13,9 +15,13 @@ from app.models.schemas import (
     ExecuteActionResponse,
     HealthResponse,
     IncidentToolCall,
-    DeploymentAction
+    AVAILABLE_TOOLS
 )
-from app.services.ollama_service import analyze_logs_with_ollama, check_ollama_connection
+from app.services.ollama_service import (
+    analyze_logs_with_ollama,
+    analyze_logs_streaming,
+    check_ollama_connection
+)
 from app.config import get_settings
 
 
@@ -35,70 +41,122 @@ async def health_check():
     )
 
 
+@router.get("/tools", tags=["Tools"])
+async def list_tools():
+    """List all available remediation tools."""
+    tools = []
+    for name, info in AVAILABLE_TOOLS.items():
+        tools.append({
+            "name": name,
+            "description": info["description"],
+            "use_cases": info["use_cases"],
+            "parameters": info["params"].model_json_schema()
+        })
+    return {"tools": tools}
+
+
 @router.post("/analyze", response_model=AnalyzeResponse, tags=["Analysis"])
 async def analyze_logs(request: AnalyzeRequest):
     """
-    Analyze logs and propose remediation action using Ollama LLM.
-
-    This endpoint sends recent logs to the local LLM for analysis and
-    returns a proposed action if intervention is needed.
+    Analyze logs and propose remediation action using Ollama LLM (non-streaming).
     """
     try:
         proposal = await analyze_logs_with_ollama(request.logs)
 
         if proposal:
-            return AnalyzeResponse(
-                success=True,
-                proposal=proposal
-            )
+            return AnalyzeResponse(success=True, proposal=proposal)
         else:
-            # Return fallback response for demo purposes
-            # Extract pod name from error log if available
-            error_logs = [log for log in request.logs if log.level in ["ERROR", "CRITICAL"]]
-            pod_name = error_logs[0].pod if error_logs else "payment-service-7d9cf"
-            deployment = pod_name.rsplit("-", 1)[0] if "-" in pod_name else pod_name
-
-            fallback = IncidentToolCall(
-                toolName="scale_deployment",
-                args=DeploymentAction(
-                    namespace="prod",
-                    deployment=deployment,
-                    replicas=5
-                ),
-                reason="Critical error detected. LLM analysis unavailable - using fallback recommendation to scale deployment for load distribution."
-            )
-
             return AnalyzeResponse(
-                success=True,
-                proposal=fallback,
-                error="LLM analysis unavailable, using fallback"
+                success=False,
+                error="LLM analysis returned no proposal"
             )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/analyze/stream", tags=["Analysis"])
+async def analyze_logs_stream(request: AnalyzeRequest):
+    """
+    Analyze logs with streaming response (Server-Sent Events).
+    """
+    async def event_generator():
+        try:
+            async for chunk in analyze_logs_streaming(request.logs):
+                event_type = chunk.get("type", "content")
+                data = json.dumps(chunk)
+                yield f"event: {event_type}\ndata: {data}\n\n"
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
 @router.post("/execute", response_model=ExecuteActionResponse, tags=["Actions"])
 async def execute_action(request: ExecuteActionRequest):
     """
     Execute a remediation action (simulated).
-
-    This endpoint simulates executing a Kubernetes action like scaling a deployment.
-    In a real implementation, this would call the Kubernetes API.
     """
-    if request.tool_name != "scale_deployment":
-        raise HTTPException(status_code=400, detail=f"Unknown tool: {request.tool_name}")
+    tool_name = request.tool_name
+    params = request.parameters
+
+    if tool_name not in AVAILABLE_TOOLS:
+        raise HTTPException(status_code=400, detail=f"Unknown tool: {tool_name}")
 
     # Simulate execution delay
     await asyncio.sleep(2.0)
 
+    # Generate response based on tool type
+    if tool_name == "scale_deployment":
+        message = f"Scaled deployment '{params.get('deployment')}' to {params.get('replicas')} replicas in namespace '{params.get('namespace', 'default')}'"
+
+    elif tool_name == "restart_pod":
+        graceful = "gracefully" if params.get('graceful', True) else "forcefully"
+        message = f"Restarted pod '{params.get('pod')}' {graceful} in namespace '{params.get('namespace', 'default')}'"
+
+    elif tool_name == "rollback_deployment":
+        revision = params.get('revision', 'previous')
+        message = f"Rolled back deployment '{params.get('deployment')}' to revision {revision} in namespace '{params.get('namespace', 'default')}'"
+
+    elif tool_name == "drain_node":
+        message = f"Drained node '{params.get('node')}' - all pods evicted successfully"
+
+    elif tool_name == "cordon_node":
+        action = "cordoned" if params.get('cordon', True) else "uncordoned"
+        message = f"Node '{params.get('node')}' has been {action}"
+
+    elif tool_name == "delete_pod":
+        force = "force " if params.get('force', False) else ""
+        message = f"Pod '{params.get('pod')}' {force}deleted from namespace '{params.get('namespace', 'default')}'"
+
+    elif tool_name == "update_resource_limits":
+        limits = []
+        if params.get('cpu_limit'):
+            limits.append(f"CPU limit: {params['cpu_limit']}")
+        if params.get('memory_limit'):
+            limits.append(f"Memory limit: {params['memory_limit']}")
+        message = f"Updated resource limits for '{params.get('deployment')}': {', '.join(limits) if limits else 'no changes'}"
+
+    elif tool_name == "apply_network_policy":
+        message = f"Applied network policy '{params.get('policy_name')}' ({params.get('action')}) to pods matching '{params.get('target_pod_selector')}'"
+
+    else:
+        message = f"Executed {tool_name} with parameters: {params}"
+
     return ExecuteActionResponse(
         status="success",
-        message=f"Successfully scaled deployment '{request.parameters.deployment}' in namespace '{request.parameters.namespace}' to {request.parameters.replicas} replicas",
+        message=message,
         details={
-            "namespace": request.parameters.namespace,
-            "deployment": request.parameters.deployment,
-            "replicas": request.parameters.replicas,
+            "tool": tool_name,
+            "parameters": params,
             "timestamp": datetime.now().isoformat()
         }
     )

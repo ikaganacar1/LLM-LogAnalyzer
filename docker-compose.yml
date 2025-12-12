@@ -1,21 +1,4 @@
-version: '3.8'
-
 services:
-  # Ollama LLM Service
-  ollama:
-    image: ollama/ollama:latest
-    container_name: kubesentinel-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    restart: unless-stopped
-
   # Backend API Service
   backend:
     build:
@@ -25,17 +8,11 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - OLLAMA_HOST=http://ollama:11434
-      - OLLAMA_MODEL=gpt-oss:20b
-      - OLLAMA_TIMEOUT=120
-      - DEBUG=false
-    depends_on:
-      - ollama
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gpt-oss:20b}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-120}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Frontend Service
@@ -47,10 +24,7 @@ services:
         - VITE_API_URL=http://localhost:8000
     container_name: kubesentinel-frontend
     ports:
-      - "3000:80"
+      - "3001:80"
     depends_on:
       - backend
     restart: unless-stopped
-
-volumes:
-  ollama_data:

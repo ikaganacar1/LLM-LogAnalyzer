@@ -1,29 +1,68 @@
 """
-Ollama LLM service for log analysis.
+Ollama LLM service for log analysis with streaming support.
 """
 
 import json
 import httpx
-from typing import Optional
+import re
+from typing import Optional, AsyncGenerator
 
 from app.config import get_settings
-from app.models.schemas import LogEntry, IncidentToolCall, DeploymentAction
+from app.models.schemas import LogEntry, IncidentToolCall
 
 
-SYSTEM_PROMPT = """You are a Kubernetes Site Reliability Engineer (SRE) assistant.
-Your job is to analyze Kubernetes logs and propose remediation actions.
+SYSTEM_PROMPT = """You are a Kubernetes Site Reliability Engineer (SRE) AI assistant.
+Your job is to analyze Kubernetes logs and propose the most appropriate remediation action.
 
-When you identify a critical issue that requires intervention, respond ONLY with a JSON object in this exact format:
-{"toolName": "scale_deployment", "args": {"namespace": "...", "deployment": "...", "replicas": N}, "reason": "Your analysis of the root cause and why the action is needed"}
+## Available Tools
 
-Rules:
-- Only respond with valid JSON, no markdown, no extra text
-- The namespace should be "prod" or "default" based on context
-- The deployment name should match the pod name prefix (e.g., "payment-service" from "payment-service-7d9cf")
-- Replicas should be a reasonable number (3-5 typically)
-- The reason should explain the root cause based on log analysis
+1. **scale_deployment** - Scale deployment replicas up or down
+   Parameters: namespace, deployment, replicas
+   Use when: OOMKilled, high traffic, CPU pressure, load balancing needed
 
-Do not include any other text or explanation outside the JSON object."""
+2. **restart_pod** - Restart a specific pod (delete and recreate)
+   Parameters: namespace, pod, graceful (bool)
+   Use when: Pod stuck, memory leak, unresponsive app, needs config refresh
+
+3. **rollback_deployment** - Rollback to previous deployment version
+   Parameters: namespace, deployment, revision (optional)
+   Use when: Bad deployment, app errors after update, performance regression
+
+4. **drain_node** - Safely evict all pods from a node
+   Parameters: node, force (bool), ignore_daemonsets (bool), timeout
+   Use when: Node hardware issues, maintenance needed, OS updates
+
+5. **cordon_node** - Mark node as unschedulable
+   Parameters: node, cordon (bool - true to cordon, false to uncordon)
+   Use when: Prevent new pods on problematic node, gradual drain
+
+6. **delete_pod** - Force delete a stuck pod
+   Parameters: namespace, pod, force (bool)
+   Use when: Pod stuck in Terminating, zombie pods, cleanup needed
+
+7. **update_resource_limits** - Update CPU/Memory limits
+   Parameters: namespace, deployment, cpu_limit, memory_limit, cpu_request, memory_request
+   Use when: OOMKilled frequently, CPU throttling, resource optimization
+
+8. **apply_network_policy** - Apply network traffic rules
+   Parameters: namespace, policy_name, action (allow/deny), target_pod_selector
+   Use when: Security incident, DDoS, traffic isolation needed
+
+## Response Format
+
+Respond with a JSON object:
+{
+  "toolName": "<tool_name>",
+  "args": { <tool-specific parameters> },
+  "reason": "<detailed explanation of the issue and why this action will fix it>"
+}
+
+## Rules
+- Analyze ALL logs to understand the full context
+- Choose the MOST appropriate tool for the specific issue
+- Extract deployment/pod names from the log entries
+- Provide detailed reasoning explaining root cause and fix
+- namespace defaults to "prod" unless logs indicate otherwise"""
 
 
 def format_logs_for_analysis(logs: list[LogEntry]) -> str:
@@ -45,30 +84,154 @@ async def check_ollama_connection() -> bool:
         return False
 
 
-async def analyze_logs_with_ollama(logs: list[LogEntry]) -> Optional[IncidentToolCall]:
-    """
-    Analyze logs using Ollama LLM and propose remediation action.
+def extract_json_from_response(content: str) -> Optional[dict]:
+    """Extract JSON from response, handling think tags and markdown."""
+    # Remove <think>...</think> tags
+    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+    content = content.strip()
 
-    Args:
-        logs: List of recent log entries to analyze
+    # Handle markdown code blocks
+    if "```json" in content:
+        content = content.split("```json")[1].split("```")[0].strip()
+    elif "```" in content:
+        parts = content.split("```")
+        if len(parts) >= 2:
+            content = parts[1].strip()
 
-    Returns:
-        IncidentToolCall if action is needed, None otherwise
-    """
-    settings = get_settings()
+    # Try to find JSON object with toolName
+    json_match = re.search(r'\{[^{}]*"toolName"[^}]*\}', content, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group())
+        except:
+            pass
 
-    log_context = format_logs_for_analysis(logs)
-
-    user_prompt = f"""Analyze the following recent Kubernetes log entries. A critical incident has been detected.
-
-Recent Logs:
-{log_context}
-
-Based on the logs, identify the root cause and propose a remediation action using the scale_deployment tool.
-Respond with ONLY the JSON object."""
+    # Try to find nested JSON
+    try:
+        # Find outermost braces
+        start = content.find('{')
+        if start != -1:
+            depth = 0
+            for i, c in enumerate(content[start:]):
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        json_str = content[start:start+i+1]
+                        return json.loads(json_str)
+    except:
+        pass
 
     try:
-        async with httpx.AsyncClient(timeout=settings.ollama_timeout) as client:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
+async def analyze_logs_streaming(logs: list[LogEntry]) -> AsyncGenerator[dict, None]:
+    """
+    Analyze logs using Ollama with streaming.
+    Yields chunks with type: 'thinking', 'content', 'done', or 'error'
+    """
+    settings = get_settings()
+    log_context = format_logs_for_analysis(logs)
+
+    user_prompt = f"""Analyze these Kubernetes log entries. A critical incident has been detected.
+
+LOGS:
+{log_context}
+
+Based on these logs:
+1. Identify the root cause of the incident
+2. Choose the most appropriate remediation tool
+3. Provide the complete JSON response with toolName, args, and detailed reason"""
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(settings.ollama_timeout)) as client:
+            async with client.stream(
+                "POST",
+                f"{settings.ollama_host}/api/chat",
+                json={
+                    "model": settings.ollama_model,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "stream": True,
+                    "options": {
+                        "temperature": 0.3,
+                        "num_predict": 2000
+                    }
+                }
+            ) as response:
+                if response.status_code != 200:
+                    yield {"type": "error", "content": f"Ollama error: {response.status_code}"}
+                    return
+
+                full_content = ""
+                in_think = False
+
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+
+                    try:
+                        chunk = json.loads(line)
+                        token = chunk.get("message", {}).get("content", "")
+                        full_content += token
+
+                        # Track thinking state
+                        if "<think>" in token:
+                            in_think = True
+                        if "</think>" in token:
+                            in_think = False
+                            continue
+
+                        if in_think or token.startswith("<think"):
+                            yield {"type": "thinking", "content": token}
+                        else:
+                            clean_token = re.sub(r'</?think>', '', token)
+                            if clean_token:
+                                yield {"type": "content", "content": clean_token}
+
+                        if chunk.get("done"):
+                            proposal = extract_json_from_response(full_content)
+                            if proposal:
+                                yield {
+                                    "type": "done",
+                                    "proposal": proposal
+                                }
+                            else:
+                                yield {"type": "error", "content": "Could not parse response as JSON"}
+                    except json.JSONDecodeError:
+                        continue
+
+    except httpx.TimeoutException:
+        yield {"type": "error", "content": "Request timed out"}
+    except Exception as e:
+        yield {"type": "error", "content": str(e)}
+
+
+async def analyze_logs_with_ollama(logs: list[LogEntry]) -> Optional[IncidentToolCall]:
+    """
+    Analyze logs using Ollama LLM (non-streaming).
+    """
+    settings = get_settings()
+    log_context = format_logs_for_analysis(logs)
+
+    user_prompt = f"""Analyze these Kubernetes log entries. A critical incident has been detected.
+
+LOGS:
+{log_context}
+
+Based on these logs:
+1. Identify the root cause of the incident
+2. Choose the most appropriate remediation tool
+3. Provide the complete JSON response with toolName, args, and detailed reason"""
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(settings.ollama_timeout)) as client:
             response = await client.post(
                 f"{settings.ollama_host}/api/chat",
                 json={
@@ -79,8 +242,8 @@ Respond with ONLY the JSON object."""
                     ],
                     "stream": False,
                     "options": {
-                        "temperature": 0.2,
-                        "num_predict": 500
+                        "temperature": 0.3,
+                        "num_predict": 2000
                     }
                 }
             )
@@ -92,31 +255,18 @@ Respond with ONLY the JSON object."""
             result = response.json()
             content = result.get("message", {}).get("content", "").strip()
 
-            # Parse JSON response
-            # Handle potential markdown code blocks
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
+            proposal_data = extract_json_from_response(content)
 
-            proposal_data = json.loads(content)
+            if not proposal_data:
+                print(f"Could not extract JSON from: {content[:300]}")
+                return None
 
             return IncidentToolCall(
                 toolName=proposal_data.get("toolName", "scale_deployment"),
-                args=DeploymentAction(
-                    namespace=proposal_data["args"]["namespace"],
-                    deployment=proposal_data["args"]["deployment"],
-                    replicas=proposal_data["args"]["replicas"]
-                ),
-                reason=proposal_data.get("reason", "AI analysis suggests scaling")
+                args=proposal_data.get("args", {}),
+                reason=proposal_data.get("reason", "AI analysis complete")
             )
 
-    except json.JSONDecodeError as e:
-        print(f"Failed to parse Ollama response as JSON: {e}")
-        return None
-    except httpx.TimeoutException:
-        print("Ollama request timed out")
-        return None
     except Exception as e:
         print(f"Ollama analysis failed: {e}")
         return None

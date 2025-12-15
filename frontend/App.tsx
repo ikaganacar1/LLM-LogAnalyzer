@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LogTerminal } from './components/LogTerminal';
-import { IncidentPanel } from './components/IncidentPanel';
+import { SystemMonitor } from './components/IncidentPanel';
 import { IncidentDashboard } from './components/IncidentDashboard';
 import { LogEntry, SystemStatus, IncidentToolCall, Incident, IncidentStatus, LogLevel } from './types';
 import { generateLog } from './services/logGenerator';
@@ -13,6 +13,10 @@ const App: React.FC = () => {
   const [systemStatus, setSystemStatus] = useState<SystemStatus>(SystemStatus.HEALTHY);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   
+  // Queue Processing State
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [llmMetrics, setLlmMetrics] = useState({ tps: 0, latency: 0 });
+
   // Navigation State
   const [currentView, setCurrentView] = useState<'monitor' | 'dashboard'>('monitor');
   const [isTerminalPaused, setIsTerminalPaused] = useState(false);
@@ -21,7 +25,6 @@ const App: React.FC = () => {
   // --- Refs ---
   const intervalRef = useRef<number | null>(null);
   const logsRef = useRef<LogEntry[]>([]);
-  const processingRef = useRef<boolean>(false);
 
   // Keep ref synced for callbacks
   useEffect(() => {
@@ -29,44 +32,58 @@ const App: React.FC = () => {
   }, [logs]);
 
   // --- Logic: Queue Processing ---
-  // Watches the incidents array. If there is a PENDING incident and we aren't processing, start LLM.
   useEffect(() => {
     const processQueue = async () => {
-      // Safety check: ensure we don't double process
-      if (processingRef.current) return;
+      // If already processing, do nothing.
+      if (isProcessing) return;
 
       // Find the oldest pending incident (FIFO)
       const pendingIncident = incidents.find(i => i.status === IncidentStatus.PENDING);
       
       if (pendingIncident) {
-        processingRef.current = true;
+        setIsProcessing(true);
+        const startTime = Date.now();
 
         // Update status to analyzing
         setIncidents(prev => prev.map(i => 
           i.id === pendingIncident.id ? { ...i, status: IncidentStatus.ANALYZING } : i
         ));
         
-        // Only update global status if we aren't already dealing with a detected incident that needs action
+        // Update global status for UI feedback
         setSystemStatus(prev => prev === SystemStatus.INCIDENT_DETECTED ? prev : SystemStatus.ANALYZING);
 
         let thinkingBuffer = '';
         let contentBuffer = '';
+        let tokenCount = 0;
+
+        // Simulate TPS calculation
+        const tpsInterval = setInterval(() => {
+          const elapsed = (Date.now() - startTime) / 1000;
+          if (elapsed > 0) {
+            setLlmMetrics(prev => ({ ...prev, tps: Math.floor(tokenCount / elapsed) + Math.floor(Math.random() * 5) }));
+          }
+        }, 1000);
 
         try {
           await analyzeLogsStreaming(pendingIncident.contextLogs, {
             onThinking: (chunk) => {
               thinkingBuffer += chunk;
+              tokenCount += chunk.split(' ').length; // Rough token estimation
               setIncidents(prev => prev.map(i => 
                 i.id === pendingIncident.id ? { ...i, thinking: thinkingBuffer } : i
               ));
             },
             onContent: (chunk) => {
               contentBuffer += chunk;
+              tokenCount += chunk.split(' ').length;
               setIncidents(prev => prev.map(i => 
                  i.id === pendingIncident.id ? { ...i, analysis: contentBuffer } : i
               ));
             },
             onDone: (proposal) => {
+              clearInterval(tpsInterval);
+              setLlmMetrics({ tps: 0, latency: Date.now() - startTime });
+              
               setIncidents(prev => prev.map(i => 
                 i.id === pendingIncident.id ? { 
                   ...i, 
@@ -76,11 +93,15 @@ const App: React.FC = () => {
                   analysis: contentBuffer
                 } : i
               ));
-              // Always flag detection when analysis finishes
+              
               setSystemStatus(SystemStatus.INCIDENT_DETECTED);
+              setIsProcessing(false); // Trigger effect to look for next item
             },
             onError: (error) => {
+              clearInterval(tpsInterval);
+              setLlmMetrics({ tps: 0, latency: 0 });
               console.error('Analysis failed', error);
+              
               setIncidents(prev => prev.map(i => 
                 i.id === pendingIncident.id ? { 
                   ...i, 
@@ -93,21 +114,21 @@ const App: React.FC = () => {
                   analysis: 'Analysis failed. Showing fallback.'
                 } : i
               ));
+              
               setSystemStatus(SystemStatus.INCIDENT_DETECTED);
+              setIsProcessing(false); // Trigger effect to look for next item
             }
           });
         } catch (e) {
+          clearInterval(tpsInterval);
           console.error("Queue processing error", e);
-        } finally {
-          processingRef.current = false;
-          // Force a re-check of the queue in case React batching missed an update cycle trigger
-          // (Though the state update on incidents above should trigger this effect again)
+          setIsProcessing(false);
         }
       }
     };
 
     processQueue();
-  }, [incidents]);
+  }, [incidents, isProcessing]);
 
   // --- Logic: Log Generation ---
   const handleCriticalLog = useCallback((log: LogEntry) => {
@@ -207,10 +228,8 @@ const App: React.FC = () => {
     }
   };
 
-  // Get the most recent relevant incident for the Monitor View
-  const activeIncident = incidents
-    .filter(i => i.status !== IncidentStatus.RESOLVED && i.status !== IncidentStatus.IGNORED)
-    .sort((a,b) => b.timestamp.localeCompare(a.timestamp))[0] || null;
+  // Find active processing incident for live view
+  const activeProcessingIncident = incidents.find(i => i.status === IncidentStatus.ANALYZING);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-slate-950 overflow-hidden font-sans">
@@ -304,15 +323,20 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          {/* Right: Active Incident Panel */}
+          {/* Right: System Monitor */}
           <div className="w-full md:w-1/2 h-1/2 md:h-full bg-slate-950">
-             <IncidentPanel
+             <SystemMonitor
                  status={systemStatus}
-                 proposal={activeIncident?.proposal || null}
-                 thinking={activeIncident?.thinking}
-                 aiContent={activeIncident?.analysis}
-                 onApprove={() => activeIncident && handleApprove(activeIncident.id)}
-                 onIgnore={() => activeIncident && handleIgnore(activeIncident.id)}
+                 queueLength={incidents.filter(i => i.status === IncidentStatus.PENDING).length}
+                 analyzedCount={incidents.filter(i => i.status === IncidentStatus.ANALYZED).length}
+                 isAnalyzing={isProcessing}
+                 currentAnalysis={
+                    activeProcessingIncident 
+                    ? (activeProcessingIncident.thinking || activeProcessingIncident.analysis || '') 
+                    : ''
+                 }
+                 tps={llmMetrics.tps}
+                 latency={llmMetrics.latency}
              />
           </div>
         </div>

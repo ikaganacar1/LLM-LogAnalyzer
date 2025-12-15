@@ -3,25 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>KubeSentinel</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-      /* Custom scrollbar for terminal look */
-      .scrollbar-hide::-webkit-scrollbar {
-          display: none;
-      }
-      .scrollbar-hide {
-          -ms-overflow-style: none;
-          scrollbar-width: none;
-      }
-      @keyframes pulse-soft {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.7; }
-      }
-      .animate-pulse-soft {
-        animation: pulse-soft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-      }
-    </style>
+    <title>AI Log Analyzer</title>
   <script type="importmap">
 {
   "imports": {
@@ -32,10 +14,9 @@
   }
 }
 </script>
-<link rel="stylesheet" href="/index.css">
 </head>
-  <body class="bg-slate-950 text-slate-200 antialiased overflow-hidden">
-    <div id="root" class="h-screen w-screen flex flex-col"></div>
+  <body class="antialiased overflow-hidden">
+    <div id="root"></div>
   <script type="module" src="/index.tsx"></script>
 </body>
 </html>

@@ -2,25 +2,42 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LogTerminal } from './components/LogTerminal';
 import { SystemMonitor } from './components/IncidentPanel';
 import { IncidentDashboard } from './components/IncidentDashboard';
-import { LogEntry, SystemStatus, IncidentToolCall, Incident, IncidentStatus, LogLevel } from './types';
+import { Settings } from './components/Settings';
+import { AppSidebar } from './components/AppSidebar';
+import { SidebarProvider, SidebarInset } from './components/ui/sidebar';
+import { LogEntry, SystemStatus, Incident, IncidentStatus, LogLevel } from './types';
 import { generateLog } from './services/logGenerator';
 import { analyzeLogsStreaming } from './services/api';
-import { LayoutDashboard, Activity, TerminalSquare, Pause, Play } from 'lucide-react';
+import { Pause, Play } from 'lucide-react';
 
 const App: React.FC = () => {
   // --- State ---
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [systemStatus, setSystemStatus] = useState<SystemStatus>(SystemStatus.HEALTHY);
   const [incidents, setIncidents] = useState<Incident[]>([]);
-  
+
   // Queue Processing State
   const [isProcessing, setIsProcessing] = useState(false);
   const [llmMetrics, setLlmMetrics] = useState({ tps: 0, latency: 0 });
 
   // Navigation State
-  const [currentView, setCurrentView] = useState<'monitor' | 'dashboard'>('monitor');
+  const [currentView, setCurrentView] = useState<'monitor' | 'dashboard' | 'settings'>('monitor');
   const [isTerminalPaused, setIsTerminalPaused] = useState(false);
   const [isLogGenPaused, setIsLogGenPaused] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(false);
+
+  // Settings State
+  const [logContextSize, setLogContextSize] = useState(() => {
+    const saved = localStorage.getItem('logContextSize');
+    return saved ? parseInt(saved) : 15;
+  });
+  const [logGenerationInterval, setLogGenerationInterval] = useState(() => {
+    const saved = localStorage.getItem('logGenerationInterval');
+    return saved ? parseInt(saved) : 800;
+  });
+  const [currentModel, setCurrentModel] = useState(() => {
+    return localStorage.getItem('selected_model') || '';
+  });
 
   // --- Refs ---
   const intervalRef = useRef<number | null>(null);
@@ -30,6 +47,25 @@ const App: React.FC = () => {
   useEffect(() => {
     logsRef.current = logs;
   }, [logs]);
+
+  // Fetch current model name on mount
+  useEffect(() => {
+    const fetchModelName = async () => {
+      try {
+        const response = await fetch(`http://localhost:8000/api/health`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.model) {
+            setCurrentModel(data.model);
+            localStorage.setItem('selected_model', data.model);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch model name:', error);
+      }
+    };
+    fetchModelName();
+  }, []);
 
   // --- Logic: Queue Processing ---
   useEffect(() => {
@@ -133,8 +169,8 @@ const App: React.FC = () => {
   // --- Logic: Log Generation ---
   const handleCriticalLog = useCallback((log: LogEntry) => {
     // Take a snapshot of recent logs including the critical one
-    const contextLogs = [...logsRef.current.slice(-15), log];
-    
+    const contextLogs = [...logsRef.current.slice(-logContextSize), log];
+
     const newIncident: Incident = {
       id: Math.random().toString(36).substring(7),
       timestamp: log.timestamp,
@@ -144,16 +180,16 @@ const App: React.FC = () => {
     };
 
     setIncidents(prev => [...prev, newIncident]);
-  }, []);
+  }, [logContextSize]);
 
   const startLogStream = useCallback(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
-    
+
     if (isLogGenPaused) return;
 
     intervalRef.current = window.setInterval(() => {
       // 2% Chance of critical error
-      const shouldTriggerError = Math.random() < 0.02;
+      const shouldTriggerError = Math.random() < 0.1;
       const newLog = generateLog(shouldTriggerError);
 
       // Add to logs state
@@ -166,8 +202,8 @@ const App: React.FC = () => {
         handleCriticalLog(newLog);
       }
 
-    }, 800); 
-  }, [handleCriticalLog, isLogGenPaused]);
+    }, logGenerationInterval);
+  }, [handleCriticalLog, isLogGenPaused, logGenerationInterval]);
 
   useEffect(() => {
     startLogStream();
@@ -231,127 +267,142 @@ const App: React.FC = () => {
   // Find active processing incident for live view
   const activeProcessingIncident = incidents.find(i => i.status === IncidentStatus.ANALYZING);
 
+  // Dark mode toggle
+  const toggleDarkMode = () => {
+    setIsDarkMode(!isDarkMode);
+    document.documentElement.classList.toggle('dark');
+  };
+
+  // Settings handlers
+  const handleLogContextSizeChange = (size: number) => {
+    setLogContextSize(size);
+    localStorage.setItem('logContextSize', size.toString());
+  };
+
+  const handleLogGenerationIntervalChange = (interval: number) => {
+    setLogGenerationInterval(interval);
+    localStorage.setItem('logGenerationInterval', interval.toString());
+  };
+
+  const getViewTitle = () => {
+    switch (currentView) {
+      case 'monitor': return 'Live Monitor';
+      case 'dashboard': return 'Incident Dashboard';
+      case 'settings': return 'Settings';
+      default: return '';
+    }
+  };
+
   return (
-    <div className="flex flex-col h-screen w-screen bg-slate-950 overflow-hidden font-sans">
-      
-      {/* Navigation Bar */}
-      <nav className="h-14 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between px-6 shrink-0">
-        <div className="flex items-center gap-2">
-           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-900/20">
-             <TerminalSquare className="text-white" size={20} />
-           </div>
-           <h1 className="text-white font-bold tracking-tight text-lg">KubeSentinel <span className="text-blue-500 text-xs uppercase tracking-wider ml-1">AI Ops</span></h1>
-        </div>
-        
-        <div className="flex items-center gap-4">
-           {/* Log Controls */}
-           <button 
-             onClick={() => setIsLogGenPaused(!isLogGenPaused)}
-             className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider transition-all border ${
-               isLogGenPaused 
-                 ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20 hover:bg-yellow-500/20'
-                 : 'bg-green-500/10 text-green-500 border-green-500/20 hover:bg-green-500/20'
-             }`}
-           >
-             {isLogGenPaused ? <Play size={12} fill="currentColor" /> : <Pause size={12} fill="currentColor" />}
-             {isLogGenPaused ? 'Resume Logs' : 'Pause Logs'}
-           </button>
-
-           <div className="h-6 w-px bg-slate-800"></div>
-
-           <div className="flex bg-slate-900 p-1 rounded-lg border border-slate-800">
-             <button 
-               onClick={() => setCurrentView('monitor')}
-               className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
-                 currentView === 'monitor' 
-                   ? 'bg-slate-800 text-white shadow-sm' 
-                   : 'text-slate-400 hover:text-slate-200'
-               }`}
-             >
-               <Activity size={16} /> Live Monitor
-             </button>
-             <button 
-               onClick={() => setCurrentView('dashboard')}
-               className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
-                 currentView === 'dashboard' 
-                   ? 'bg-slate-800 text-white shadow-sm' 
-                   : 'text-slate-400 hover:text-slate-200'
-               }`}
-             >
-               <LayoutDashboard size={16} /> 
-               Incidents 
-               {incidents.filter(i => i.status === IncidentStatus.ANALYZED).length > 0 && (
-                 <span className="bg-red-500 text-white text-[10px] px-1.5 rounded-full min-w-[1.25rem] text-center">
-                   {incidents.filter(i => i.status === IncidentStatus.ANALYZED).length}
-                 </span>
-               )}
-             </button>
+    <SidebarProvider defaultOpen={true}>
+      <AppSidebar
+        currentView={currentView}
+        onViewChange={setCurrentView}
+        analyzedCount={incidents.filter(i => i.status === IncidentStatus.ANALYZED).length}
+      />
+      <SidebarInset>
+        {/* Header Bar */}
+        <header className="h-14 border-b border-border bg-card/50 flex items-center justify-between px-6 shrink-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-foreground font-semibold text-base">
+              {getViewTitle()}
+            </h2>
           </div>
-        </div>
-      </nav>
 
-      {/* Main Content */}
-      <div className="flex-1 overflow-hidden relative">
-        
-        {/* Monitor View */}
-        <div className={`absolute inset-0 flex flex-col md:flex-row transition-opacity duration-300 ${currentView === 'monitor' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-          {/* Left: Terminal */}
-          <div className="w-full md:w-1/2 h-1/2 md:h-full border-b md:border-b-0 md:border-r border-slate-800 flex flex-col">
-            <div className="p-2 bg-slate-900 border-b border-slate-800 flex justify-between items-center">
-                <span className="text-xs text-slate-500 font-mono pl-2">
-                   {isLogGenPaused ? 'LOG STREAM PAUSED' : 'STREAMING...'}
-                </span>
-                <button 
-                   onClick={() => setIsTerminalPaused(!isTerminalPaused)}
-                   className={`text-xs uppercase font-mono px-2 py-1 rounded ${isTerminalPaused ? 'bg-white text-black' : 'text-slate-400 hover:text-white'}`}
-                >
-                  {isTerminalPaused ? 'Scroll Locked' : 'Auto-Scroll'}
-                </button>
+          {currentView !== 'settings' && (
+            <div className="flex items-center gap-3">
+              {/* Log Controls */}
+              <button
+                onClick={() => setIsLogGenPaused(!isLogGenPaused)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider transition-all border h-9 shadow-xs ${
+                  isLogGenPaused
+                    ? 'bg-warning/10 text-warning border-warning/20 hover:bg-warning/20'
+                    : 'bg-success/10 text-success border-success/20 hover:bg-success/20'
+                }`}
+              >
+                {isLogGenPaused ? <Play size={12} fill="currentColor" /> : <Pause size={12} fill="currentColor" />}
+                {isLogGenPaused ? 'Resume' : 'Pause'}
+              </button>
             </div>
-            <div className="flex-1 overflow-hidden relative">
-               <LogTerminal
-                   logs={logs}
-                   isPaused={isTerminalPaused}
+          )}
+        </header>
+
+        {/* Main Content */}
+        <div className="flex-1 overflow-hidden relative bg-background">
+
+          {/* Monitor View */}
+          <div className={`absolute inset-0 flex flex-col md:flex-row transition-opacity duration-300 ${currentView === 'monitor' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+            {/* Left: Terminal */}
+            <div className="w-full md:w-1/2 h-1/2 md:h-full border-b md:border-b-0 md:border-r border-border flex flex-col">
+              <div className="p-2 bg-card border-b border-border flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground font-mono pl-2">
+                     {isLogGenPaused ? 'LOG STREAM PAUSED' : 'STREAMING...'}
+                  </span>
+                  <button
+                     onClick={() => setIsTerminalPaused(!isTerminalPaused)}
+                     className={`text-xs uppercase font-mono px-2 py-1 rounded h-9 ${isTerminalPaused ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground'}`}
+                  >
+                    {isTerminalPaused ? 'Scroll Locked' : 'Auto-Scroll'}
+                  </button>
+              </div>
+              <div className="flex-1 overflow-hidden relative">
+                 <LogTerminal
+                     logs={logs}
+                     isPaused={isTerminalPaused}
+                 />
+                 {isLogGenPaused && (
+                   <div className="absolute inset-0 bg-black/50 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
+                      <div className="bg-card border border-border px-4 py-2 rounded-lg text-muted-foreground text-sm shadow-xl flex items-center gap-2">
+                        <Pause size={14} /> Generator Paused
+                      </div>
+                   </div>
+                 )}
+              </div>
+            </div>
+
+            {/* Right: System Monitor */}
+            <div className="w-full md:w-1/2 h-1/2 md:h-full bg-background">
+               <SystemMonitor
+                   status={systemStatus}
+                   queueLength={incidents.filter(i => i.status === IncidentStatus.PENDING).length}
+                   analyzedCount={incidents.filter(i => i.status === IncidentStatus.ANALYZED).length}
+                   isAnalyzing={isProcessing}
+                   currentAnalysis={
+                      activeProcessingIncident
+                      ? (activeProcessingIncident.thinking || activeProcessingIncident.analysis || '')
+                      : ''
+                   }
+                   tps={llmMetrics.tps}
+                   latency={llmMetrics.latency}
+                   modelName={currentModel}
                />
-               {isLogGenPaused && (
-                 <div className="absolute inset-0 bg-black/50 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
-                    <div className="bg-slate-900 border border-slate-700 px-4 py-2 rounded-lg text-slate-400 text-sm shadow-xl flex items-center gap-2">
-                      <Pause size={14} /> Generator Paused
-                    </div>
-                 </div>
-               )}
             </div>
           </div>
 
-          {/* Right: System Monitor */}
-          <div className="w-full md:w-1/2 h-1/2 md:h-full bg-slate-950">
-             <SystemMonitor
-                 status={systemStatus}
-                 queueLength={incidents.filter(i => i.status === IncidentStatus.PENDING).length}
-                 analyzedCount={incidents.filter(i => i.status === IncidentStatus.ANALYZED).length}
-                 isAnalyzing={isProcessing}
-                 currentAnalysis={
-                    activeProcessingIncident 
-                    ? (activeProcessingIncident.thinking || activeProcessingIncident.analysis || '') 
-                    : ''
-                 }
-                 tps={llmMetrics.tps}
-                 latency={llmMetrics.latency}
+          {/* Dashboard View */}
+          <div className={`absolute inset-0 transition-opacity duration-300 ${currentView === 'dashboard' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+             <IncidentDashboard
+                incidents={incidents}
+                onApprove={handleApprove}
+                onIgnore={handleIgnore}
              />
           </div>
-        </div>
 
-        {/* Dashboard View */}
-        <div className={`absolute inset-0 bg-slate-950 transition-opacity duration-300 ${currentView === 'dashboard' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-           <IncidentDashboard 
-              incidents={incidents}
-              onApprove={handleApprove}
-              onIgnore={handleIgnore}
-           />
-        </div>
+          {/* Settings View */}
+          <div className={`absolute inset-0 transition-opacity duration-300 ${currentView === 'settings' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+             <Settings
+                isDarkMode={isDarkMode}
+                onToggleDarkMode={toggleDarkMode}
+                logContextSize={logContextSize}
+                onLogContextSizeChange={handleLogContextSizeChange}
+                logGenerationInterval={logGenerationInterval}
+                onLogGenerationIntervalChange={handleLogGenerationIntervalChange}
+             />
+          </div>
 
-      </div>
-    </div>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 };
 

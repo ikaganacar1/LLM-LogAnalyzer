@@ -13,6 +13,10 @@ services:
       - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-120}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "ollama.ikaganacar.com:104.21.2.41"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     restart: unless-stopped
 
   # Frontend Service

@@ -10,8 +10,8 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Application
-    app_name: str = "KubeSentinel API"
-    app_version: str = "1.0.0"
+    app_name: str = "AI Log Analyzer API"
+    app_version: str = "1.0.0-POC"
     debug: bool = False
 
     # Ollama Configuration

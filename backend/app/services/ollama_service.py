@@ -203,7 +203,8 @@ Based on these logs:
                                     "proposal": proposal
                                 }
                             else:
-                                yield {"type": "error", "content": "Could not parse response as JSON"}
+                                print(f"[DEBUG] Failed to parse JSON from LLM response. Full content:\n{full_content}\n")
+                                yield {"type": "error", "content": f"Could not parse response as JSON. Response preview: {full_content[:500]}"}
                     except json.JSONDecodeError:
                         continue
 
